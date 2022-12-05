@@ -1215,17 +1215,20 @@ fn new_backtrace_inner(
 ///
 /// It must be set as the global allocator (via `#[global_allocator]`) when
 /// doing heap profiling.
-#[derive(Debug)]
-pub struct Alloc;
+#[derive(Debug, Default)]
+pub struct Alloc<T: GlobalAlloc> {
+    /// your own alloc
+    pub allocator: T,
+}
 
-unsafe impl GlobalAlloc for Alloc {
+unsafe impl<T: GlobalAlloc> GlobalAlloc for Alloc<T> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            System.alloc(layout)
+            self.allocator.alloc(layout)
         } else {
             let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            let ptr = System.alloc(layout);
+            let ptr = self.allocator.alloc(layout);
             if ptr.is_null() {
                 return ptr;
             }
@@ -1246,10 +1249,10 @@ unsafe impl GlobalAlloc for Alloc {
     unsafe fn realloc(&self, old_ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            System.realloc(old_ptr, layout, new_size)
+            self.allocator.realloc(old_ptr, layout, new_size)
         } else {
             let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            let new_ptr = System.realloc(old_ptr, layout, new_size);
+            let new_ptr = self.allocator.realloc(old_ptr, layout, new_size);
             if new_ptr.is_null() {
                 return new_ptr;
             }
@@ -1288,10 +1291,10 @@ unsafe impl GlobalAlloc for Alloc {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            System.dealloc(ptr, layout)
+            self.allocator.dealloc(ptr, layout)
         } else {
             let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            System.dealloc(ptr, layout);
+            self.allocator.dealloc(ptr, layout);
 
             if let Phase::Running(g @ Globals { heap: Some(_), .. }) = phase {
                 let size = layout.size();
