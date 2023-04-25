@@ -374,7 +374,7 @@ use lazy_static::lazy_static;
 use mintex::Mutex;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -383,6 +383,8 @@ use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thousands::Separable;
+use tikv_jemalloc_sys::malloc_usable_size;
+use tikv_jemallocator::Jemalloc;
 
 lazy_static! {
     static ref TRI_GLOBALS: Mutex<Phase<Globals>> = Mutex::new(Phase::Ready);
@@ -1210,28 +1212,38 @@ fn new_backtrace_inner(
     Backtrace(frames.into())
 }
 
+/// The minimum recorded usable size.
+const MIN_USZ: usize = 2048;
+
+#[inline]
+unsafe fn should_record(ptr: *mut u8) -> bool {
+    malloc_usable_size(ptr as *const _) >= MIN_USZ
+}
+
 /// A global allocator that tracks allocations and deallocations on behalf of
 /// the [`Profiler`] type.
 ///
 /// It must be set as the global allocator (via `#[global_allocator]`) when
 /// doing heap profiling.
-#[derive(Debug, Default)]
-pub struct Alloc<T: GlobalAlloc> {
-    /// your own alloc
-    pub allocator: T,
-}
+#[derive(Debug)]
+pub struct Alloc;
 
-unsafe impl<T: GlobalAlloc> GlobalAlloc for Alloc<T> {
+unsafe impl GlobalAlloc for Alloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            self.allocator.alloc(layout)
+            Jemalloc.alloc(layout)
         } else {
-            let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            let ptr = self.allocator.alloc(layout);
+            let ptr = Jemalloc.alloc(layout);
             if ptr.is_null() {
                 return ptr;
             }
+
+            if !should_record(ptr) {
+                return ptr;
+            }
+
+            let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
 
             if let Phase::Running(g @ Globals { heap: Some(_), .. }) = phase {
                 let size = layout.size();
@@ -1249,13 +1261,22 @@ unsafe impl<T: GlobalAlloc> GlobalAlloc for Alloc<T> {
     unsafe fn realloc(&self, old_ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            self.allocator.realloc(old_ptr, layout, new_size)
+            Jemalloc.realloc(old_ptr, layout, new_size)
         } else {
-            let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            let new_ptr = self.allocator.realloc(old_ptr, layout, new_size);
+            let old_rec = should_record(old_ptr);
+
+            let new_ptr = Jemalloc.realloc(old_ptr, layout, new_size);
             if new_ptr.is_null() {
                 return new_ptr;
             }
+
+            let new_rec = should_record(new_ptr);
+
+            if !old_rec && !new_rec {
+                return new_ptr;
+            }
+
+            let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
 
             if let Phase::Running(g @ Globals { heap: Some(_), .. }) = phase {
                 let old_size = layout.size();
@@ -1291,10 +1312,17 @@ unsafe impl<T: GlobalAlloc> GlobalAlloc for Alloc<T> {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            self.allocator.dealloc(ptr, layout)
+            Jemalloc.dealloc(ptr, layout)
         } else {
+            let recorded = should_record(ptr);
+
+            Jemalloc.dealloc(ptr, layout);
+
+            if !recorded {
+                return;
+            }
+
             let phase: &mut Phase<Globals> = &mut TRI_GLOBALS.lock();
-            self.allocator.dealloc(ptr, layout);
 
             if let Phase::Running(g @ Globals { heap: Some(_), .. }) = phase {
                 let size = layout.size();
