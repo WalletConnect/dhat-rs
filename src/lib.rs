@@ -1212,12 +1212,13 @@ fn new_backtrace_inner(
     Backtrace(frames.into())
 }
 
-/// The minimum recorded usable size.
-const MIN_USZ: usize = 2048;
-
 #[inline]
 unsafe fn should_record(ptr: *mut u8) -> bool {
-    malloc_usable_size(ptr as *const _) >= MIN_USZ
+    // We're interested only in these specific bins.
+    match malloc_usable_size(ptr as *const _) {
+        2048 | 8192 => true,
+        _ => false,
+    }
 }
 
 /// A global allocator that tracks allocations and deallocations on behalf of
