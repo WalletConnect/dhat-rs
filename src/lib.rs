@@ -1296,23 +1296,35 @@ unsafe impl GlobalAlloc for Alloc {
                 let h = g.heap.as_mut().unwrap();
                 let live_block = h.live_blocks.remove(&(old_ptr as usize));
 
-                // Record the new allocation only if it's of interest to us, even if the old one
-                // was recorded.
+                // Record the new allocation only if it's of interest to us,
+                // even if the old one was recorded.
                 if !new_rec {
-                    return new_ptr;
-                }
+                    // If we're no longer interested in this allocation, mark
+                    // it as deallocated instead.
+                    if let Some(LiveBlock {
+                        pp_info_idx,
+                        allocation_instant,
+                    }) = live_block
+                    {
+                        let size = layout.size();
+                        g.check_for_global_peak();
 
-                let (pp_info_idx, delta) = if let Some(live_block) = live_block {
-                    (live_block.pp_info_idx, Some(delta))
+                        let alloc_duration = allocation_instant.elapsed();
+                        g.update_counts_for_dealloc(pp_info_idx, size, alloc_duration);
+                    }
                 } else {
-                    let bt = new_backtrace!(g);
-                    let pp_info_idx = g.get_pp_info(bt, PpInfo::new_heap);
-                    (pp_info_idx, None)
-                };
+                    let (pp_info_idx, delta) = if let Some(live_block) = live_block {
+                        (live_block.pp_info_idx, Some(delta))
+                    } else {
+                        let bt = new_backtrace!(g);
+                        let pp_info_idx = g.get_pp_info(bt, PpInfo::new_heap);
+                        (pp_info_idx, None)
+                    };
 
-                let now = Instant::now();
-                g.record_block(new_ptr, pp_info_idx, now);
-                g.update_counts_for_alloc(pp_info_idx, new_size, delta, now);
+                    let now = Instant::now();
+                    g.record_block(new_ptr, pp_info_idx, now);
+                    g.update_counts_for_alloc(pp_info_idx, new_size, delta, now);
+                }
             }
             new_ptr
         }
