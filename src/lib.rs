@@ -1273,6 +1273,7 @@ unsafe impl GlobalAlloc for Alloc {
 
             let new_rec = should_record(new_ptr);
 
+            // Bail if we're not tracking the old allocation, and not interested in the new one.
             if !old_rec && !new_rec {
                 return new_ptr;
             }
@@ -1294,6 +1295,13 @@ unsafe impl GlobalAlloc for Alloc {
                 // we treat it like an `alloc`.
                 let h = g.heap.as_mut().unwrap();
                 let live_block = h.live_blocks.remove(&(old_ptr as usize));
+
+                // Record the new allocation only if it's of interest to us, even if the old one
+                // was recorded.
+                if !new_rec {
+                    return new_ptr;
+                }
+
                 let (pp_info_idx, delta) = if let Some(live_block) = live_block {
                     (live_block.pp_info_idx, Some(delta))
                 } else {
