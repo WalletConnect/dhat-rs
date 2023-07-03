@@ -1216,7 +1216,7 @@ fn new_backtrace_inner(
 unsafe fn should_record(ptr: *mut u8) -> bool {
     // We're interested only in these specific bins.
     match malloc_usable_size(ptr as *const _) {
-        1280 => true,
+        8192 => true,
         _ => false,
     }
 }
