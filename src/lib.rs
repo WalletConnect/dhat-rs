@@ -383,8 +383,9 @@ use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thousands::Separable;
-use tikv_jemalloc_sys::malloc_usable_size;
-use tikv_jemallocator::Jemalloc;
+
+mod alloc_filter;
+pub use alloc_filter::*;
 
 lazy_static! {
     static ref TRI_GLOBALS: Mutex<Phase<Globals>> = Mutex::new(Phase::Ready);
@@ -1212,35 +1213,56 @@ fn new_backtrace_inner(
     Backtrace(frames.into())
 }
 
-#[inline]
-unsafe fn should_record(ptr: *mut u8) -> bool {
-    // We're interested only in these specific bins.
-    match malloc_usable_size(ptr as *const _) {
-        8192 => true,
-        _ => false,
-    }
-}
-
 /// A global allocator that tracks allocations and deallocations on behalf of
 /// the [`Profiler`] type.
 ///
 /// It must be set as the global allocator (via `#[global_allocator]`) when
 /// doing heap profiling.
-#[derive(Debug)]
-pub struct Alloc;
+#[derive(Debug, Default)]
+pub struct Alloc<B: GlobalAlloc = std::alloc::System, F: AllocFilter = NoopFilter> {
+    backend: B,
+    filter: F,
+}
 
-unsafe impl GlobalAlloc for Alloc {
+impl Alloc<std::alloc::System, NoopFilter> {
+    /// Constructs a global allocator using [`std::alloc::System`] as backend
+    /// allocator and [`NoopFilter`] as allocation filter.
+    pub const fn default() -> Self {
+        Self {
+            backend: std::alloc::System,
+            filter: NoopFilter,
+        }
+    }
+}
+
+impl<B, F> Alloc<B, F>
+where
+    B: GlobalAlloc,
+    F: AllocFilter,
+{
+    /// Constructs a new global allocator with specified backend allocator and
+    /// filter.
+    pub const fn new(backend: B, filter: F) -> Self {
+        Self { backend, filter }
+    }
+}
+
+unsafe impl<A, F> GlobalAlloc for Alloc<A, F>
+where
+    A: GlobalAlloc,
+    F: AllocFilter,
+{
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            Jemalloc.alloc(layout)
+            self.backend.alloc(layout)
         } else {
-            let ptr = Jemalloc.alloc(layout);
+            let ptr = self.backend.alloc(layout);
             if ptr.is_null() {
                 return ptr;
             }
 
-            if !should_record(ptr) {
+            if !self.filter.should_record(ptr) {
                 return ptr;
             }
 
@@ -1262,16 +1284,16 @@ unsafe impl GlobalAlloc for Alloc {
     unsafe fn realloc(&self, old_ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            Jemalloc.realloc(old_ptr, layout, new_size)
+            self.backend.realloc(old_ptr, layout, new_size)
         } else {
-            let old_rec = should_record(old_ptr);
+            let old_rec = self.filter.should_record(old_ptr);
 
-            let new_ptr = Jemalloc.realloc(old_ptr, layout, new_size);
+            let new_ptr = self.backend.realloc(old_ptr, layout, new_size);
             if new_ptr.is_null() {
                 return new_ptr;
             }
 
-            let new_rec = should_record(new_ptr);
+            let new_rec = self.filter.should_record(new_ptr);
 
             // Bail if we're not tracking the old allocation, and not interested in the new one.
             if !old_rec && !new_rec {
@@ -1333,11 +1355,11 @@ unsafe impl GlobalAlloc for Alloc {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let ignore_allocs = IgnoreAllocs::new();
         if ignore_allocs.was_already_ignoring_allocs {
-            Jemalloc.dealloc(ptr, layout)
+            self.backend.dealloc(ptr, layout)
         } else {
-            let recorded = should_record(ptr);
+            let recorded = self.filter.should_record(ptr);
 
-            Jemalloc.dealloc(ptr, layout);
+            self.backend.dealloc(ptr, layout);
 
             if !recorded {
                 return;
@@ -1405,12 +1427,18 @@ impl Profiler {
         }
     }
 
-    // For testing purposes only.
     #[doc(hidden)]
     pub fn drop_and_get_memory_output(&mut self) -> String {
         let mut memory_output = String::new();
         self.drop_inner(Some(&mut memory_output));
         memory_output
+    }
+
+    /// Finishes the profiling session by consuming `self` and returning a
+    /// JSON-serialized profile.
+    pub fn finish(self) -> String {
+        let mut profiler = std::mem::ManuallyDrop::new(self);
+        profiler.drop_and_get_memory_output()
     }
 }
 

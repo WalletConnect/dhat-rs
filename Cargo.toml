@@ -25,6 +25,7 @@ thousands = "0.2"
 tikv-jemallocator = { version = "0.5", features = ["stats"] }
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
 tikv-jemalloc-sys = { version = "0.5", features = ["stats"] }
+libc = "0.2"
 
 [dev-dependencies]
 serial_test = "0.5"
